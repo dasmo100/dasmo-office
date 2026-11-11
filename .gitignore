@@ -1,0 +1,60 @@
+# Git ignore for dasmo-office Monorepo
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+*.env
+
+# Media outputs & temporary rendering files
+media/audio/*
+!media/audio/.gitkeep
+media/subtitles/*
+!media/subtitles/.gitkeep
+media/visuals/*
+!media/visuals/.gitkeep
+media/renders/*
+!media/renders/.gitkeep
+!media/music/*
+*.mp4
+*.ass
+*.srt
+
+# Python / FastAPI / Celery
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+.eggs/
+dist/
+build/
+venv/
+.venv/
+env/
+.env/
+
+# Node / Next.js
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+.pnp
+.pnp.js
+*.tsbuildinfo
+next-env.d.ts
+
+# Database & Celery worker data
+*.sqlite3
+celerybeat-schedule
+celerybeat.pid
+
+# OS & Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo

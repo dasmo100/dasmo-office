@@ -1,0 +1,142 @@
+name: dasmo-office
+
+services:
+  # ============================================================================
+  # Database: PostgreSQL 16 Alpine
+  # ============================================================================
+  dasmo-db:
+    image: postgres:16-alpine
+    container_name: dasmo-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-dasmo_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dasmo_secure_password}
+      POSTGRES_DB: ${POSTGRES_DB:-dasmo_db}
+    volumes:
+      - dasmo_pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - dasmo-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-dasmo_user} -d ${POSTGRES_DB:-dasmo_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ============================================================================
+  # Broker: Redis 7 Alpine
+  # ============================================================================
+  dasmo-redis:
+    image: redis:7-alpine
+    container_name: dasmo-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - dasmo_redisdata:/data
+    networks:
+      - dasmo-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  # ============================================================================
+  # Backend API: FastAPI (Python 3.11)
+  # ============================================================================
+  dasmo-api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+    container_name: dasmo-api
+    restart: unless-stopped
+    working_dir: /app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    volumes:
+      - ./backend:/app
+      - ./media:/media
+      - dasmo_hf_cache:/root/.cache/huggingface
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - POSTGRES_HOST=dasmo-db
+      - REDIS_HOST=dasmo-redis
+      - MEDIA_DIR=/media
+    depends_on:
+      dasmo-db:
+        condition: service_healthy
+      dasmo-redis:
+        condition: service_healthy
+    networks:
+      - dasmo-network
+
+  # ============================================================================
+  # Worker: Celery Video Pipeline Worker & Beat Scheduler
+  # ============================================================================
+  dasmo-worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+    container_name: dasmo-worker
+    restart: unless-stopped
+    working_dir: /app
+    command: celery -A app.worker.celery_app worker --loglevel=info -B -E
+    volumes:
+      - ./backend:/app
+      - ./media:/media
+      - dasmo_hf_cache:/root/.cache/huggingface
+    env_file:
+      - .env
+    environment:
+      - POSTGRES_HOST=dasmo-db
+      - REDIS_HOST=dasmo-redis
+      - MEDIA_DIR=/media
+    depends_on:
+      dasmo-db:
+        condition: service_healthy
+      dasmo-redis:
+        condition: service_healthy
+    networks:
+      - dasmo-network
+
+  # ============================================================================
+  # Frontend: Next.js Admin Dashboard
+  # ============================================================================
+  dasmo-frontend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.frontend
+    container_name: dasmo-frontend
+    restart: unless-stopped
+    working_dir: /app
+    command: npm run dev
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000/api/v1
+      - PORT=3000
+    depends_on:
+      - dasmo-api
+    networks:
+      - dasmo-network
+
+networks:
+  dasmo-network:
+    driver: bridge
+
+volumes:
+  dasmo_pgdata:
+    driver: local
+  dasmo_redisdata:
+    driver: local
+  dasmo_hf_cache:
+    driver: local
