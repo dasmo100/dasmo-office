@@ -34,6 +34,8 @@ import {
   Clapperboard,
   Image as ImageIcon,
   Trash2,
+  Eye,
+  EyeOff,
 } from "lucide-react";
 
 // =============================================================================
@@ -92,8 +94,8 @@ export interface SystemSettings {
   tts_rate: string;
   youtube_refresh_token_masked: string | null;
   has_youtube_token: boolean;
-  pexels_api_key_masked: string | null;
-  has_pexels_key: boolean;
+  pixabay_api_key_masked: string | null;
+  has_pixabay_key: boolean;
   auto_schedule_enabled: boolean;
   default_niche: string;
   daily_target_count: number;
@@ -137,6 +139,286 @@ function getStageIndex(status: ShortStatus): number {
   }
 }
 
+
+// =============================================================================
+// Interactive Dual-Box API Key Control Component (Casilla 1 + Casilla 2)
+// =============================================================================
+
+interface ApiKeyDualControlProps {
+  fieldName: "gemini_api_key" | "pixabay_api_key" | "youtube_refresh_token";
+  label: string;
+  hasKey: boolean;
+  maskedValue?: string | null;
+  newKeyValue: string;
+  onNewKeyChange: (val: string) => void;
+  newKeyPlaceholder?: string;
+  themeColor?: "cyan" | "indigo" | "red";
+  onDeleted?: (updated: SystemSettings) => void;
+  notify?: (type: "success" | "error", message: string) => void;
+}
+
+function ApiKeyDualControl({
+  fieldName,
+  label,
+  hasKey,
+  maskedValue,
+  newKeyValue,
+  onNewKeyChange,
+  newKeyPlaceholder,
+  themeColor = "indigo",
+  onDeleted,
+  notify,
+}: ApiKeyDualControlProps) {
+  const [isRevealed, setIsRevealed] = useState(false);
+  const [revealedValue, setRevealedValue] = useState<string | null>(null);
+  const [isLoadingReveal, setIsLoadingReveal] = useState(false);
+  const [isCopied, setIsCopied] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+
+  // Reset revealed state when hasKey or maskedValue changes (e.g. after update or deletion)
+  useEffect(() => {
+    setIsRevealed(false);
+    setRevealedValue(null);
+  }, [hasKey, maskedValue]);
+
+  const handleToggleReveal = async () => {
+    if (!hasKey) return;
+
+    if (isRevealed) {
+      setIsRevealed(false);
+      return;
+    }
+
+    if (revealedValue) {
+      setIsRevealed(true);
+      return;
+    }
+
+    setIsLoadingReveal(true);
+    try {
+      const res = await fetch(`${API_BASE}/settings/reveal?field=${fieldName}`);
+      if (res.ok) {
+        const data = await res.json();
+        setRevealedValue(data.value || "");
+        setIsRevealed(true);
+      } else {
+        notify?.("error", `No se pudo revelar la clave vinculada de ${label}.`);
+      }
+    } catch (err) {
+      console.error("Error revealing key:", err);
+      notify?.("error", "Error de red al revelar la clave vinculada.");
+    } finally {
+      setIsLoadingReveal(false);
+    }
+  };
+
+  const handleCopy = async () => {
+    if (!hasKey) return;
+
+    let textToCopy = revealedValue;
+
+    if (textToCopy === null) {
+      setIsLoadingReveal(true);
+      try {
+        const res = await fetch(`${API_BASE}/settings/reveal?field=${fieldName}`);
+        if (res.ok) {
+          const data = await res.json();
+          textToCopy = data.value || "";
+          setRevealedValue(textToCopy);
+        }
+      } catch (err) {
+        console.error("Error fetching key for copy:", err);
+      } finally {
+        setIsLoadingReveal(false);
+      }
+    }
+
+    if (textToCopy) {
+      try {
+        await navigator.clipboard.writeText(textToCopy);
+        setIsCopied(true);
+        notify?.("success", `¡Clave vinculada de ${label} copiada al portapapeles!`);
+        setTimeout(() => setIsCopied(false), 2000);
+      } catch (err) {
+        console.error("Failed to copy:", err);
+        notify?.("error", "No se pudo copiar al portapapeles.");
+      }
+    } else {
+      notify?.("error", "No hay una clave activa para copiar.");
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!hasKey) return;
+
+    const confirmed = window.confirm(
+      `¿Estás seguro de que deseas eliminar y desvincular la clave actual de ${label}?\n\nEsta acción quitará la clave de la base de datos.`
+    );
+    if (!confirmed) return;
+
+    setIsDeleting(true);
+    try {
+      const res = await fetch(`${API_BASE}/settings/key/${fieldName}`, {
+        method: "DELETE",
+      });
+      if (res.ok) {
+        const updated: SystemSettings = await res.json();
+        setIsRevealed(false);
+        setRevealedValue(null);
+        onDeleted?.(updated);
+        notify?.("success", `Clave vinculada de ${label} eliminada y desvinculada.`);
+      } else {
+        const err = await res.json().catch(() => ({}));
+        notify?.("error", `Error: ${err.detail || "No se pudo eliminar la clave."}`);
+      }
+    } catch (err) {
+      console.error("Error deleting key:", err);
+      notify?.("error", "Error de red al eliminar la clave.");
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  const borderFocusClass =
+    themeColor === "cyan"
+      ? "focus:border-cyan-400"
+      : themeColor === "red"
+      ? "focus:border-red-400"
+      : "focus:border-indigo-500";
+
+  return (
+    <div className="space-y-3 pt-1">
+      {/* Casilla 1: Clave Vinculada Actual */}
+      <div className="space-y-1">
+        <div className="flex items-center justify-between">
+          <label className="text-[10px] uppercase font-bold tracking-wider text-zinc-400 flex items-center gap-1.5">
+            <Key className="w-3 h-3 text-cyan-400" />
+            <span>Casilla 1 (Clave Vinculada Actual)</span>
+          </label>
+          {hasKey ? (
+            <span className="text-[10px] text-cyan-400 font-mono flex items-center gap-1">
+              <ShieldCheck className="w-3 h-3" />
+              {isRevealed ? "Texto visible" : "Enmascarada"}
+            </span>
+          ) : (
+            <span className="text-[10px] text-zinc-500 font-mono">
+              Sin clave vinculada
+            </span>
+          )}
+        </div>
+
+        <div className="relative flex items-center w-full">
+          <input
+            type={isRevealed ? "text" : "password"}
+            readOnly
+            value={
+              hasKey
+                ? isRevealed
+                  ? (revealedValue || "")
+                  : (maskedValue || "••••••••")
+                : "No hay clave vinculada actualmente en la base de datos"
+            }
+            className={`w-full bg-zinc-900/90 border rounded-lg pl-3 pr-28 py-2 font-mono text-[11px] select-all cursor-default focus:outline-none transition ${
+              hasKey
+                ? "border-zinc-800 text-zinc-200"
+                : "border-zinc-800/60 text-zinc-500 italic"
+            }`}
+          />
+          <div className="absolute right-1.5 flex items-center gap-1 bg-zinc-900/95 backdrop-blur px-1 py-0.5 rounded-md border border-zinc-800">
+            {/* Reveal / Hide Button */}
+            <button
+              type="button"
+              onClick={handleToggleReveal}
+              disabled={!hasKey || isLoadingReveal}
+              title={isRevealed ? "Ocultar clave vinculada" : "Mostrar clave vinculada en texto plano"}
+              className={`p-1 rounded transition ${
+                isRevealed
+                  ? "text-cyan-400 bg-cyan-950/60"
+                  : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800"
+              } disabled:opacity-30 disabled:pointer-events-none`}
+            >
+              {isLoadingReveal ? (
+                <RefreshCw className="w-3.5 h-3.5 animate-spin text-cyan-400" />
+              ) : isRevealed ? (
+                <EyeOff className="w-3.5 h-3.5" />
+              ) : (
+                <Eye className="w-3.5 h-3.5" />
+              )}
+            </button>
+
+            {/* Copy Button */}
+            <button
+              type="button"
+              onClick={handleCopy}
+              disabled={!hasKey || isLoadingReveal}
+              title={isCopied ? "¡Copiado!" : "Copiar clave vinculada al portapapeles"}
+              className={`p-1 rounded transition flex items-center gap-1 ${
+                isCopied
+                  ? "text-emerald-400 bg-emerald-950/60"
+                  : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800"
+              } disabled:opacity-30 disabled:pointer-events-none`}
+            >
+              {isCopied ? (
+                <>
+                  <Check className="w-3.5 h-3.5 text-emerald-400" />
+                  <span className="text-[9px] font-sans font-semibold text-emerald-400 pr-0.5">Copiado</span>
+                </>
+              ) : (
+                <Copy className="w-3.5 h-3.5" />
+              )}
+            </button>
+
+            {/* Delete Button */}
+            <button
+              type="button"
+              onClick={handleDelete}
+              disabled={!hasKey || isDeleting}
+              title="Eliminar y desvincular clave de la base de datos"
+              className="p-1 rounded text-red-400/70 hover:text-red-400 hover:bg-red-950/50 transition disabled:opacity-30 disabled:pointer-events-none"
+            >
+              {isDeleting ? (
+                <RefreshCw className="w-3.5 h-3.5 animate-spin text-red-400" />
+              ) : (
+                <Trash2 className="w-3.5 h-3.5" />
+              )}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Casilla 2: Ingresar Nueva Clave */}
+      <div className="space-y-1">
+        <div className="flex items-center justify-between">
+          <label className="text-[10px] uppercase font-bold tracking-wider text-zinc-400 flex items-center gap-1.5">
+            <Plus className="w-3 h-3 text-emerald-400" />
+            <span>Casilla 2 (Ingresar Nueva Clave)</span>
+          </label>
+          {newKeyValue.trim() ? (
+            <span className="text-[10px] text-emerald-400 font-mono flex items-center gap-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+              Lista para guardar
+            </span>
+          ) : (
+            <span className="text-[10px] text-zinc-500 font-mono">
+              Para vincular o actualizar
+            </span>
+          )}
+        </div>
+        <input
+          type="password"
+          value={newKeyValue}
+          onChange={(e) => onNewKeyChange(e.target.value)}
+          placeholder={newKeyPlaceholder || "Escribe o pega aquí la nueva clave para actualizar..."}
+          className={`w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-white placeholder-zinc-500 font-mono text-[11px] focus:outline-none transition ${borderFocusClass}`}
+        />
+        <p className="text-[10px] text-zinc-500">
+          Al pulsar &quot;Guardar Cambios&quot;, esta clave se vinculará en el backend, la Casilla 1 la reflejará y este campo quedará limpio.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 export default function DashboardPage() {
   // State
   const [shorts, setShorts] = useState<ShortItem[]>([]);
@@ -162,7 +444,7 @@ export default function DashboardPage() {
   const [settingsTtsVoice, setSettingsTtsVoice] = useState("es-MX-JorgeNeural");
   const [settingsTtsRate, setSettingsTtsRate] = useState("+10%");
   const [settingsYoutubeToken, setSettingsYoutubeToken] = useState("");
-  const [settingsPexelsKey, setSettingsPexelsKey] = useState("");
+  const [settingsPixabayKey, setSettingsPixabayKey] = useState("");
   const [settingsAutoSchedule, setSettingsAutoSchedule] = useState(false);
   const [settingsDefaultNiche, setSettingsDefaultNiche] = useState("Ciberseguridad y Linux");
   const [settingsDailyTarget, setSettingsDailyTarget] = useState(1);
@@ -281,8 +563,8 @@ export default function DashboardPage() {
       if (settingsYoutubeToken.trim()) {
         bodyPayload.youtube_refresh_token = settingsYoutubeToken.trim();
       }
-      if (settingsPexelsKey.trim()) {
-        bodyPayload.pexels_api_key = settingsPexelsKey.trim();
+      if (settingsPixabayKey.trim()) {
+        bodyPayload.pixabay_api_key = settingsPixabayKey.trim();
       }
 
       const res = await fetch(`${API_BASE}/settings/`, {
@@ -298,9 +580,9 @@ export default function DashboardPage() {
       const updated = await res.json();
       setSettings(updated);
       setSettingsGeminiKey("");
-      setSettingsPexelsKey("");
-      setIsSettingsOpen(false);
-      notify("success", "Configuración actualizada en vivo (Gemini, Pexels, YouTube).");
+      setSettingsPixabayKey("");
+      setSettingsYoutubeToken("");
+      notify("success", "Configuración guardada en vivo. Las credenciales vinculadas han sido actualizadas.");
     } catch (err: any) {
       notify("error", err.message || "Error al guardar configuración");
     } finally {
@@ -499,7 +781,7 @@ export default function DashboardPage() {
               </span>
             </h1>
             <p className="text-[11px] text-zinc-400">
-              Motor Híbrido (Pexels B-Roll + Flux IA) &middot; Subtítulos Pop-in &middot; Color Grading &middot; SFX
+              Motor Híbrido (Pixabay Stock + Flux IA) &middot; Subtítulos Pop-in &middot; Color Grading &middot; SFX
             </p>
           </div>
         </div>
@@ -515,12 +797,12 @@ export default function DashboardPage() {
             </span>
           </div>
 
-          {/* Pexels Badge */}
+          {/* Pixabay Badge */}
           <div className="hidden md:flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 text-xs">
-            <span className={`w-2 h-2 rounded-full ${settings?.has_pexels_key ? "bg-cyan-400" : "bg-zinc-600"}`} />
-            <span className="text-zinc-400">B-Roll Pexels:</span>
-            <span className={`font-medium ${settings?.has_pexels_key ? "text-cyan-300" : "text-zinc-500"}`}>
-              {settings?.has_pexels_key ? "Activo" : "Sin Clave"}
+            <span className={`w-2 h-2 rounded-full ${settings?.has_pixabay_key ? "bg-cyan-400" : "bg-zinc-600"}`} />
+            <span className="text-zinc-400">Pixabay Stock:</span>
+            <span className={`font-medium ${settings?.has_pixabay_key ? "text-cyan-300" : "text-zinc-500"}`}>
+              {settings?.has_pixabay_key ? "Activo" : "Sin Clave"}
             </span>
           </div>
 
@@ -1045,7 +1327,7 @@ export default function DashboardPage() {
                                   {sceneDraftMediaType === "video" && (
                                     <div>
                                       <label className="text-[10px] uppercase font-bold text-cyan-400 block mb-1">
-                                        Búsqueda B-Roll en Pexels (Inglés, 2-4 palabras):
+                                        Búsqueda B-Roll en Pixabay (Inglés, 2-4 palabras):
                                       </label>
                                       <input
                                         type="text"
@@ -1131,11 +1413,11 @@ export default function DashboardPage() {
                                   <div>
                                     <div className="flex items-center justify-between mb-0.5">
                                       <span className="text-[10px] uppercase font-bold text-zinc-500 block">
-                                        {isVideo ? "B-Roll Query (Pexels):" : "Prompt Visual 9:16 (Flux):"}
+                                        {isVideo ? "B-Roll Query (Pixabay):" : "Prompt Visual 9:16 (Flux):"}
                                       </span>
                                       {scene.pexels_search_query && (
                                         <span className="text-[9px] font-mono text-cyan-400 bg-cyan-950/40 px-1.5 py-0.2 rounded border border-cyan-800/40">
-                                          Pexels: {scene.pexels_search_query}
+                                          Pixabay: {scene.pexels_search_query}
                                         </span>
                                       )}
                                     </div>
@@ -1246,57 +1528,89 @@ export default function DashboardPage() {
                 )}
               </div>
 
-              {/* SECTION: PEXELS API KEY (VIDEOS B-ROLL) */}
+              {/* SECTION: PIXABAY API KEY (VIDEOS E IMÁGENES) */}
               <div className="p-3.5 rounded-xl bg-zinc-950 border border-zinc-800 space-y-2">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     <Clapperboard className="w-4 h-4 text-cyan-400" />
                     <div>
-                      <label className="font-semibold text-zinc-200 block text-xs">Pexels Video API Key (B-Roll Reales)</label>
-                      <span className="text-[10px] text-zinc-400">Descarga clips HD verticales 9:16 gratuitos para escenas de acción</span>
+                      <label className="font-semibold text-zinc-200 block text-xs">Pixabay API Key (Videos e Imágenes)</label>
+                      <span className="text-[10px] text-zinc-400">Descarga clips de video B-Roll y fotografías stock en alta definición</span>
                     </div>
                   </div>
-                  {settings?.has_pexels_key ? (
-                    <span className="text-[10px] text-cyan-400 bg-cyan-500/10 px-2 py-0.5 rounded-full border border-cyan-500/20 flex items-center gap-1">
-                      <ShieldCheck className="w-3 h-3" /> Clave: {settings.pexels_api_key_masked}
+                  {settings?.has_pixabay_key ? (
+                    <span className="text-[10px] text-cyan-400 bg-cyan-500/10 px-2 py-0.5 rounded-full border border-cyan-500/20 flex items-center gap-1 font-mono">
+                      <ShieldCheck className="w-3 h-3" /> Configurado: {settings.pixabay_api_key_masked || "••••••••"}
                     </span>
                   ) : (
-                    <span className="text-[10px] text-zinc-500 bg-zinc-800 px-2 py-0.5 rounded-full">Opcional</span>
+                    <span className="text-[10px] text-zinc-500 bg-zinc-800/80 px-2 py-0.5 rounded-full border border-zinc-700/40">No configurado</span>
                   )}
                 </div>
-                <input
-                  type="password"
-                  value={settingsPexelsKey}
-                  onChange={(e) => setSettingsPexelsKey(e.target.value)}
-                  placeholder={
-                    settings?.has_pexels_key
-                      ? "Pexels configurado. Pega nueva clave para actualizar..."
-                      : "Pega tu PEXELS_API_KEY gratuita aquí (de pexels.com/api)..."
-                  }
-                  className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-1.5 text-white placeholder-zinc-500 focus:outline-none focus:border-cyan-400 font-mono text-[11px]"
+                <div className="flex items-center justify-end pt-0.5">
+                  <a
+                    href="https://pixabay.com/api/docs/"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-xs text-blue-400 hover:text-blue-300 inline-flex items-center gap-1 transition"
+                  >
+                    <span>Obtener clave gratuita en Pixabay API</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
+                </div>
+                <ApiKeyDualControl
+                  fieldName="pixabay_api_key"
+                  label="Pixabay API Key"
+                  hasKey={Boolean(settings?.has_pixabay_key)}
+                  maskedValue={settings?.pixabay_api_key_masked}
+                  newKeyValue={settingsPixabayKey}
+                  onNewKeyChange={setSettingsPixabayKey}
+                  newKeyPlaceholder="Pega aquí tu nueva PIXABAY_API_KEY para vincular..."
+                  themeColor="cyan"
+                  onDeleted={(updated) => setSettings(updated)}
+                  notify={notify}
                 />
               </div>
 
               {/* Gemini API Key */}
-              <div>
-                <div className="flex items-center justify-between mb-1">
-                  <label className="font-semibold text-zinc-300">Google Gemini API Key</label>
-                  {settings?.has_gemini_key && (
-                    <span className="text-[10px] text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20 flex items-center gap-1">
-                      <ShieldCheck className="w-3 h-3" /> Clave Activa: {settings.gemini_api_key_masked}
+              <div className="p-3.5 rounded-xl bg-zinc-950 border border-zinc-800 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Sparkles className="w-4 h-4 text-indigo-400" />
+                    <div>
+                      <label className="font-semibold text-zinc-200 block text-xs">Google Gemini API Key</label>
+                      <span className="text-[10px] text-zinc-400">Guionización cinematográfica y generación de prompts visuales</span>
+                    </div>
+                  </div>
+                  {settings?.has_gemini_key ? (
+                    <span className="text-[10px] text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20 flex items-center gap-1 font-mono">
+                      <ShieldCheck className="w-3 h-3" /> Vinculado: {settings.gemini_api_key_masked || "••••••••"}
                     </span>
+                  ) : (
+                    <span className="text-[10px] text-zinc-500 bg-zinc-800/80 px-2 py-0.5 rounded-full border border-zinc-700/40">No configurado</span>
                   )}
                 </div>
-                <input
-                  type="password"
-                  value={settingsGeminiKey}
-                  onChange={(e) => setSettingsGeminiKey(e.target.value)}
-                  placeholder={
-                    settings?.has_gemini_key
-                      ? "Ingresa nueva clave para actualizar (o deja vacío)"
-                      : "Pega tu GEMINI_API_KEY aquí..."
-                  }
-                  className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3.5 py-2 text-white placeholder-zinc-500 focus:outline-none focus:border-indigo-500 transition font-mono"
+                <div className="flex items-center justify-end pt-0.5">
+                  <a
+                    href="https://aistudio.google.com/app/apikey"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-xs text-blue-400 hover:text-blue-300 inline-flex items-center gap-1 transition"
+                  >
+                    <span>Obtener clave en Google AI Studio</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
+                </div>
+                <ApiKeyDualControl
+                  fieldName="gemini_api_key"
+                  label="Google Gemini API Key"
+                  hasKey={Boolean(settings?.has_gemini_key)}
+                  maskedValue={settings?.gemini_api_key_masked}
+                  newKeyValue={settingsGeminiKey}
+                  onNewKeyChange={setSettingsGeminiKey}
+                  newKeyPlaceholder="Pega aquí tu nueva GEMINI_API_KEY para vincular..."
+                  themeColor="indigo"
+                  onDeleted={(updated) => setSettings(updated)}
+                  notify={notify}
                 />
               </div>
 
@@ -1375,15 +1689,26 @@ export default function DashboardPage() {
                     <Tv className="w-4 h-4 text-red-500" />
                     <span className="font-semibold text-zinc-200">YouTube Data API v3</span>
                   </div>
-                  {settings?.has_youtube_token ? (
-                    <span className="text-[10px] text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20 flex items-center gap-1">
-                      <Check className="w-3 h-3" /> Token Conectado
-                    </span>
-                  ) : (
-                    <span className="text-[10px] text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded-full border border-amber-500/20">
-                      Sin Conectar
-                    </span>
-                  )}
+                  <div className="flex items-center gap-2">
+                    <a
+                      href="https://console.cloud.google.com/apis/credentials"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-xs text-blue-400 hover:text-blue-300 inline-flex items-center gap-1 transition"
+                    >
+                      <span>Crear credenciales en Google Cloud Console</span>
+                      <ExternalLink className="w-3 h-3" />
+                    </a>
+                    {settings?.has_youtube_token ? (
+                      <span className="text-[10px] text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20 flex items-center gap-1 font-mono">
+                        <Check className="w-3 h-3" /> Conectado: {settings.youtube_refresh_token_masked || "••••••••"}
+                      </span>
+                    ) : (
+                      <span className="text-[10px] text-zinc-500 bg-zinc-800/80 px-2 py-0.5 rounded-full border border-zinc-700/40">
+                        No configurado
+                      </span>
+                    )}
+                  </div>
                 </div>
 
                 <div className="flex flex-col sm:flex-row gap-2">
@@ -1397,20 +1722,18 @@ export default function DashboardPage() {
                   </button>
                 </div>
 
-                <div>
-                  <label className="text-[10px] text-zinc-400 block mb-1">
-                    O pega directamente el Refresh Token:
-                  </label>
-                  <input
-                    type="password"
-                    value={settingsYoutubeToken}
-                    onChange={(e) => setSettingsYoutubeToken(e.target.value)}
-                    placeholder={
-                      settings?.has_youtube_token
-                        ? `Token activo: ${settings.youtube_refresh_token_masked || "••••"}`
-                        : "Pega tu refresh_token aquí si no usas el botón OAuth..."
-                    }
-                    className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-1.5 text-white placeholder-zinc-500 focus:outline-none focus:border-indigo-500 font-mono text-[11px]"
+                <div className="pt-1">
+                  <ApiKeyDualControl
+                    fieldName="youtube_refresh_token"
+                    label="YouTube Refresh Token"
+                    hasKey={Boolean(settings?.has_youtube_token)}
+                    maskedValue={settings?.youtube_refresh_token_masked}
+                    newKeyValue={settingsYoutubeToken}
+                    onNewKeyChange={setSettingsYoutubeToken}
+                    newKeyPlaceholder="Pega aquí el nuevo refresh_token para vincular..."
+                    themeColor="red"
+                    onDeleted={(updated) => setSettings(updated)}
+                    notify={notify}
                   />
                 </div>
               </div>
@@ -1422,7 +1745,7 @@ export default function DashboardPage() {
                   onClick={() => setIsSettingsOpen(false)}
                   className="px-4 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 font-medium transition"
                 >
-                  Cancelar
+                  Cerrar
                 </button>
                 <button
                   type="submit"

@@ -60,8 +60,8 @@ class Settings(BaseSettings):
     YOUTUBE_CLIENT_SECRET: str = ""
     YOUTUBE_REFRESH_TOKEN: str = ""
 
-    # Pexels API
-    PEXELS_API_KEY: str = ""
+    # Pixabay API
+    PIXABAY_API_KEY: str = ""
 
     @field_validator("BACKEND_CORS_ORIGINS", mode="before")
     @classmethod

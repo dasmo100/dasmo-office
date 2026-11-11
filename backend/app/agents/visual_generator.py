@@ -157,14 +157,15 @@ NOUN_MAPPINGS_ES_TO_EN: Dict[str, str] = {
 
 class VisualGeneratorAgent(BaseAgent):
     """Bulletproof Hybrid Visual Generator Agent:
-    - Real 9:16 vertical B-Roll video clips from Pexels API when scene media_type == 'video'.
-    - High-definition vertical 9:16 images from Pollinations AI (Flux model with immediate Turbo retry).
-    - Real stock photography fallback (Pexels Photos, LoremFlickr, Picsum) with cinematic grading.
+    - Real 9:16 vertical B-Roll video clips from Pixabay Videos API when scene media_type == 'video'.
+    - High-definition vertical 9:16 stock photography from Pixabay Images API when media_type == 'image'.
+    - Pollinations AI (Flux model with immediate Turbo retry) as secondary fallback.
+    - Real stock photography fallback (LoremFlickr, Picsum) with cinematic grading.
     - Zero blue canvas fallback with text: guarantees 100% photographic and cinematic visuals.
     """
 
-    PEXELS_VIDEOS_ENDPOINT = "https://api.pexels.com/videos/search"
-    PEXELS_PHOTOS_ENDPOINT = "https://api.pexels.com/v1/search"
+    PIXABAY_VIDEOS_ENDPOINT = "https://pixabay.com/api/videos/"
+    PIXABAY_IMAGES_ENDPOINT = "https://pixabay.com/api/"
     USER_AGENT = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
@@ -216,19 +217,17 @@ class VisualGeneratorAgent(BaseAgent):
         else:
             focal_anchor = "technology hardware"
 
-        # 2. Pexels query (2 to 4 words strictly describing the physical action/subject)
-        if clean_pexels and len(clean_pexels.split()) <= 4:
-            pexels_query = clean_pexels
-        elif clean_kw and len(clean_kw.split()) <= 4:
-            pexels_query = clean_kw
+        # 2. Stock search query (2 to 4 words strictly describing the physical action/subject)
+        if clean_kw and len(clean_kw.split()) <= 4:
+            stock_query = clean_kw
+        elif clean_pexels and len(clean_pexels.split()) <= 4:
+            stock_query = clean_pexels
         elif extracted_nouns:
-            pexels_query = " ".join(extracted_nouns[:3])
+            stock_query = " ".join(extracted_nouns[:3])
         else:
-            pexels_query = focal_anchor
+            stock_query = focal_anchor
 
         # 3. Reinforced Pollinations Prompt:
-        # Prepend focal anchor to visual_prompt_en so the physical subject is
-        # placed in the highest-attention initial tokens of the prompt.
         raw_prompt = scene_data.get("visual_prompt_en") or ""
         clean_prompt = re.sub(r"[^a-zA-Z0-9\s]", " ", raw_prompt).strip()
 
@@ -238,19 +237,10 @@ class VisualGeneratorAgent(BaseAgent):
         else:
             reinforced_prompt = f"{focal_anchor}, {clean_prompt}" if clean_prompt else focal_anchor
 
-        # 4. Reinforced Stock Photo Keywords (for Pexels Photos / LoremFlickr)
-        if clean_kw:
-            stock_keywords = " ".join(clean_kw.split()[:3])
-        elif extracted_nouns:
-            stock_keywords = " ".join(extracted_nouns[:2])
-        else:
-            stock_keywords = focal_anchor
-
         return {
             "focal_anchor": focal_anchor,
-            "pexels_query": pexels_query,
+            "stock_query": stock_query,
             "reinforced_prompt": reinforced_prompt,
-            "stock_keywords": stock_keywords,
         }
 
     def generate_fallback_image(
@@ -298,14 +288,14 @@ class VisualGeneratorAgent(BaseAgent):
         image.save(output_path, "JPEG", quality=92)
         return str(output_path)
 
-    def download_pexels_video_sync(
+    def download_pixabay_video_sync(
         self,
         scene_number: int,
         query: str,
         output_path: Path,
         api_key: str,
     ) -> Optional[str]:
-        """Query Pexels Video Search API, select the highest quality vertical mp4 clip,
+        """Query Pixabay Videos API, select the best quality stream (large or medium),
         and download it to output_path.
         """
         if not api_key:
@@ -313,76 +303,75 @@ class VisualGeneratorAgent(BaseAgent):
 
         clean_query = query.strip()
         if not clean_query:
-            clean_query = "cinematic vertical footage"
+            clean_query = "technology"
 
         params = {
-            "query": clean_query,
-            "orientation": "portrait",
-            "size": "medium",
+            "key": api_key,
+            "q": clean_query,
+            "video_type": "film",
             "per_page": 5,
         }
         headers = {
-            "Authorization": api_key,
             "User-Agent": self.USER_AGENT,
         }
 
         try:
             self.logger.info(
-                "Searching Pexels B-Roll Video for Scene #%d [query: '%s']...",
+                "Searching Pixabay B-Roll Video for Scene #%d [query: '%s']...",
                 scene_number,
                 clean_query,
             )
-            with httpx.Client(timeout=18.0, follow_redirects=True) as client:
-                resp = client.get(self.PEXELS_VIDEOS_ENDPOINT, params=params, headers=headers)
+            with httpx.Client(timeout=20.0, follow_redirects=True) as client:
+                resp = client.get(self.PIXABAY_VIDEOS_ENDPOINT, params=params, headers=headers)
                 if resp.status_code != 200:
                     self.logger.warning(
-                        "Pexels API responded with status %d for query '%s'",
+                        "Pixabay API responded with status %d for query '%s'",
                         resp.status_code,
                         clean_query,
                     )
                     return None
 
                 data = resp.json()
-                videos = data.get("videos") or []
-                if not videos:
-                    # Retry with simplified 2-word core focal query if original query had > 2 words
+                hits = data.get("hits") or []
+
+                if not hits:
                     words = clean_query.split()
                     if len(words) > 2:
                         simplified_query = " ".join(words[:2])
                         self.logger.info(
-                            "No videos for '%s'. Retrying Pexels with simplified query: '%s'...",
+                            "No Pixabay videos for '%s'. Retrying with simplified query: '%s'...",
                             clean_query,
                             simplified_query,
                         )
-                        params["query"] = simplified_query
-                        retry_resp = client.get(self.PEXELS_VIDEOS_ENDPOINT, params=params, headers=headers)
+                        params["q"] = simplified_query
+                        retry_resp = client.get(self.PIXABAY_VIDEOS_ENDPOINT, params=params, headers=headers)
                         if retry_resp.status_code == 200:
-                            videos = retry_resp.json().get("videos") or []
+                            hits = retry_resp.json().get("hits") or []
 
-                if not videos:
-                    self.logger.warning("No Pexels videos found for query '%s'", clean_query)
+                if not hits:
+                    self.logger.warning("No Pixabay videos found for query '%s'", clean_query)
                     return None
 
-                # Find candidate vertical video file
                 selected_download_url = None
-                for vid in videos:
-                    video_files = vid.get("video_files") or []
-                    for vf in video_files:
-                        if vf.get("file_type") == "video/mp4":
-                            w = vf.get("width") or 0
-                            h = vf.get("height") or 0
-                            if h > w:  # Portrait
-                                selected_download_url = vf.get("link")
-                                break
+                # Prefer portrait video stream if present
+                for hit in hits:
+                    vids = hit.get("videos") or {}
+                    for quality in ["large", "medium", "small"]:
+                        v_info = vids.get(quality) or {}
+                        if v_info.get("url") and (v_info.get("height", 0) > v_info.get("width", 0)):
+                            selected_download_url = v_info["url"]
+                            break
                     if selected_download_url:
                         break
 
+                # Otherwise select highest quality available (large or medium)
                 if not selected_download_url:
-                    for vid in videos:
-                        video_files = vid.get("video_files") or []
-                        for vf in video_files:
-                            if vf.get("file_type") == "video/mp4" and vf.get("link"):
-                                selected_download_url = vf.get("link")
+                    for hit in hits:
+                        vids = hit.get("videos") or {}
+                        for quality in ["large", "medium", "small"]:
+                            v_info = vids.get(quality) or {}
+                            if v_info.get("url"):
+                                selected_download_url = v_info["url"]
                                 break
                         if selected_download_url:
                             break
@@ -390,24 +379,112 @@ class VisualGeneratorAgent(BaseAgent):
                 if not selected_download_url:
                     return None
 
-                self.logger.info("Downloading Pexels video clip for Scene #%d...", scene_number)
-                vid_resp = client.get(selected_download_url, timeout=25.0)
+                self.logger.info("Downloading Pixabay video clip for Scene #%d...", scene_number)
+                vid_resp = client.get(selected_download_url, timeout=30.0)
                 if vid_resp.status_code == 200 and len(vid_resp.content) >= 15360:
                     with open(output_path, "wb") as f:
                         f.write(vid_resp.content)
                     self.logger.info(
-                        "Successfully downloaded Pexels B-Roll video for Scene #%d (%.1f KB) to '%s'",
+                        "Successfully downloaded Pixabay B-Roll video for Scene #%d (%.1f KB) to '%s'",
                         scene_number,
                         len(vid_resp.content) / 1024,
                         output_path,
                     )
                     return str(output_path)
                 else:
-                    self.logger.warning("Failed to download video stream from Pexels for Scene #%d", scene_number)
+                    self.logger.warning("Failed to download video stream from Pixabay for Scene #%d", scene_number)
                     return None
 
         except Exception as e:
-            self.logger.warning("Pexels video download error for Scene #%d: %s", scene_number, e)
+            self.logger.warning("Pixabay video download error for Scene #%d: %s", scene_number, e)
+            return None
+
+    def download_pixabay_image_sync(
+        self,
+        scene_number: int,
+        query: str,
+        output_path: Path,
+        api_key: str,
+    ) -> Optional[str]:
+        """Query Pixabay Images API for vertical stock photo, download largeImageURL,
+        crop to 1080x1920, apply cinematic color grading, and save to output_path.
+        """
+        if not api_key:
+            return None
+
+        clean_query = query.strip()
+        if not clean_query:
+            clean_query = "technology"
+
+        params = {
+            "key": api_key,
+            "q": clean_query,
+            "image_type": "photo",
+            "orientation": "vertical",
+            "per_page": 5,
+        }
+        headers = {
+            "User-Agent": self.USER_AGENT,
+        }
+
+        try:
+            self.logger.info(
+                "Searching Pixabay vertical photo for Scene #%d [query: '%s']...",
+                scene_number,
+                clean_query,
+            )
+            with httpx.Client(timeout=20.0, follow_redirects=True) as client:
+                resp = client.get(self.PIXABAY_IMAGES_ENDPOINT, params=params, headers=headers)
+                if resp.status_code != 200:
+                    self.logger.warning(
+                        "Pixabay Images API responded with status %d for query '%s'",
+                        resp.status_code,
+                        clean_query,
+                    )
+                    return None
+
+                data = resp.json()
+                hits = data.get("hits") or []
+
+                if not hits:
+                    words = clean_query.split()
+                    if len(words) > 2:
+                        simplified_query = " ".join(words[:2])
+                        self.logger.info(
+                            "No Pixabay photos for '%s'. Retrying with simplified query: '%s'...",
+                            clean_query,
+                            simplified_query,
+                        )
+                        params["q"] = simplified_query
+                        retry_resp = client.get(self.PIXABAY_IMAGES_ENDPOINT, params=params, headers=headers)
+                        if retry_resp.status_code == 200:
+                            hits = retry_resp.json().get("hits") or []
+
+                if not hits:
+                    self.logger.warning("No Pixabay photos found for query '%s'", clean_query)
+                    return None
+
+                # Find best image URL from hits (largeImageURL > fullHDURL > webformatURL)
+                selected_img_url = None
+                for hit in hits:
+                    url = hit.get("largeImageURL") or hit.get("fullHDURL") or hit.get("webformatURL")
+                    if url:
+                        selected_img_url = url
+                        break
+
+                if not selected_img_url:
+                    return None
+
+                self.logger.info("Downloading Pixabay stock photo for Scene #%d...", scene_number)
+                img_resp = client.get(selected_img_url, timeout=25.0)
+                if img_resp.status_code == 200 and len(img_resp.content) >= 15360:
+                    return self._process_and_save_photo(img_resp.content, output_path, scene_number, "Pixabay Photo")
+                else:
+                    self.logger.warning("Failed to download image stream from Pixabay for Scene #%d", scene_number)
+                    return None
+
+        except Exception as e:
+            self.logger.warning("Pixabay image download error for Scene #%d: %s", scene_number, e)
             return None
 
     def download_pollinations_image_sync(
@@ -422,7 +499,6 @@ class VisualGeneratorAgent(BaseAgent):
         - Immediate retry with model=turbo if flux fails or returns < 15KB.
         - Validates image decodability with Pillow before saving.
         """
-        # Sanitize prompt: remove quotes, slashes, punctuation that break URLs
         clean_words = re.sub(r"[^a-zA-Z0-9\s]", " ", prompt).split()
         clean_prompt = " ".join(clean_words[:25])
         if not clean_prompt:
@@ -434,7 +510,6 @@ class VisualGeneratorAgent(BaseAgent):
             "Accept": "image/avif,image/webp,image/apng,image/jpeg,image/*,*/*;q=0.8",
         }
 
-        # Attempts: First Flux, then Turbo
         models_to_try = ["flux", "turbo"]
         for model in models_to_try:
             seed = random.randint(100000, 9999999)
@@ -451,7 +526,6 @@ class VisualGeneratorAgent(BaseAgent):
                 with httpx.Client(timeout=25.0, follow_redirects=True, headers=headers) as client:
                     resp = client.get(url)
                     if resp.status_code == 200 and len(resp.content) >= 15360:
-                        # Verify bytes represent a valid decodeable image
                         img = Image.open(io.BytesIO(resp.content))
                         img.verify()
                         with open(output_path, "wb") as f:
@@ -481,15 +555,14 @@ class VisualGeneratorAgent(BaseAgent):
         scene_number: int,
         keywords: str,
         output_path: Path,
-        pexels_api_key: Optional[str] = None,
     ) -> Optional[str]:
-        """Download a real, high-resolution vertical photo from Pexels Photos,
-        LoremFlickr or Picsum, and apply cinematic grading and 1080x1920 cropping.
+        """Download real stock photo from LoremFlickr or Picsum as secondary fallback,
+        and apply cinematic grading and 1080x1920 cropping.
         """
         clean_kw = re.sub(r"[^a-zA-Z0-9\s]", " ", keywords).strip()
         search_kw = " ".join(clean_kw.split()[:3]) or "technology hardware"
         self.logger.info(
-            "Searching real stock photo fallback for Scene #%d [keywords: '%s']...",
+            "Searching stock photo fallback for Scene #%d [keywords: '%s']...",
             scene_number,
             search_kw,
         )
@@ -498,33 +571,7 @@ class VisualGeneratorAgent(BaseAgent):
             "User-Agent": self.USER_AGENT,
         }
 
-        # 1. Try Pexels Photos API if key is available
-        if pexels_api_key:
-            try:
-                pex_headers = {
-                    "Authorization": pexels_api_key,
-                    "User-Agent": self.USER_AGENT,
-                }
-                params = {
-                    "query": search_kw,
-                    "orientation": "portrait",
-                    "per_page": 5,
-                }
-                with httpx.Client(timeout=15.0, follow_redirects=True) as client:
-                    resp = client.get(self.PEXELS_PHOTOS_ENDPOINT, params=params, headers=pex_headers)
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        photos = data.get("photos") or []
-                        if photos:
-                            photo_url = photos[0].get("src", {}).get("large2x") or photos[0].get("src", {}).get("original")
-                            if photo_url:
-                                img_resp = client.get(photo_url, timeout=20.0)
-                                if img_resp.status_code == 200 and len(img_resp.content) >= 15360:
-                                    return self._process_and_save_photo(img_resp.content, output_path, scene_number, "Pexels Photo")
-            except Exception as e:
-                self.logger.warning("Pexels photo search failed for Scene #%d: %s", scene_number, e)
-
-        # 2. Try LoremFlickr with category keywords
+        # 1. Try LoremFlickr with category keywords
         try:
             encoded_kw = urllib.parse.quote(search_kw.replace(" ", ","))
             lorem_url = f"https://loremflickr.com/{self.target_width}/{self.target_height}/{encoded_kw}"
@@ -535,7 +582,7 @@ class VisualGeneratorAgent(BaseAgent):
         except Exception as e:
             self.logger.warning("LoremFlickr photo search failed for Scene #%d: %s", scene_number, e)
 
-        # 3. Try Picsum Photos with random seed
+        # 2. Try Picsum Photos with random seed
         try:
             seed = random.randint(100, 99999)
             picsum_url = f"https://picsum.photos/{self.target_width}/{self.target_height}?random={seed}"
@@ -560,11 +607,8 @@ class VisualGeneratorAgent(BaseAgent):
         if img.mode != "RGB":
             img = img.convert("RGB")
 
-        # Fit to 1080x1920 keeping aspect ratio
         fitted = ImageOps.fit(img, (self.target_width, self.target_height), method=Image.Resampling.LANCZOS)
-
-        # Cinematic color enhancement
-        graded = ImageEnhance.Brightness(fitted).enhance(0.86)
+        graded = ImageEnhance.Brightness(fitted).enhance(0.88)
         graded = ImageEnhance.Contrast(graded).enhance(1.10)
 
         graded.save(output_path, "JPEG", quality=92)
@@ -582,57 +626,78 @@ class VisualGeneratorAgent(BaseAgent):
         scene_number: int,
         scene_data: Dict[str, Any],
         visuals_dir: Path,
-        pexels_api_key: Optional[str] = None,
+        pixabay_api_key: Optional[str] = None,
     ) -> str:
-        """Process visual for a single scene with strict Script-to-Visual Alignment
-        and bulletproof fallback:
-        1. Pexels B-Roll Video if media_type == 'video' and pexels_api_key exists.
-        2. Pollinations AI (Flux model with immediate Turbo retry).
-        3. Real stock photograph fallback (Pexels Photos, LoremFlickr, Picsum) with cinematic grading.
-        4. Textless cinematic bokeh canvas as last-ditch offline fallback.
+        """Process visual for a single scene with strict Script-to-Visual Alignment:
+        1. If media_type == 'video':
+           - Query Pixabay Videos API (film, per_page=5).
+           - Download best MP4 stream (large/medium) to scene_{n}.mp4.
+           - ffmpeg_renderer adjusts to 1080x1920 center-crop.
+        2. If media_type == 'image' (or fallback of video):
+           - Query FIRST Pixabay Images API (photo, vertical, per_page=5).
+           - Download largeImageURL to scene_{n}.jpg cropped to 1080x1920.
+           - If no Pixabay results: Pollinations AI (Flux -> Turbo) as secondary fallback.
+           - If Pollinations fails: stock photo fallback (LoremFlickr / Picsum).
+           - Last-ditch: textless cinematic gradient bokeh canvas.
         """
         media_type = (scene_data.get("media_type") or "image").lower()
         aligned = self.build_aligned_scene_prompts(scene_data)
         focal_anchor = aligned["focal_anchor"]
-        pexels_query = aligned["pexels_query"]
+        stock_query = aligned["stock_query"]
         visual_prompt = aligned["reinforced_prompt"]
-        search_keywords = aligned["stock_keywords"]
 
         narration_preview = (scene_data.get("narration_es") or "")[:50]
         self.logger.info(
-            "Scene #%d Alignment [Narration: '%s...'] -> Focal: '%s' | PexelsQuery: '%s' | MediaType: %s",
+            "Scene #%d Alignment [Narration: '%s...'] -> Focal: '%s' | StockQuery: '%s' | MediaType: %s",
             scene_number,
             narration_preview,
             focal_anchor,
-            pexels_query,
+            stock_query,
             media_type,
         )
 
-        # 1. Attempt Pexels Video B-Roll
-        if media_type == "video" and pexels_api_key:
+        # 1. Attempt Pixabay Video B-Roll
+        if media_type == "video":
             mp4_path = visuals_dir / f"scene_{scene_number}.mp4"
-            downloaded = self.download_pexels_video_sync(scene_number, pexels_query, mp4_path, pexels_api_key)
-            if downloaded and Path(downloaded).exists():
-                return downloaded
-            self.logger.info("Pexels video not available for Scene #%d. Falling back to image pipeline.", scene_number)
+            if pixabay_api_key:
+                downloaded = self.download_pixabay_video_sync(
+                    scene_number,
+                    stock_query,
+                    mp4_path,
+                    pixabay_api_key,
+                )
+                if downloaded and Path(downloaded).exists():
+                    return downloaded
+                self.logger.info("Pixabay video not found for Scene #%d. Falling back to image pipeline.", scene_number)
+            else:
+                self.logger.info("Pixabay API Key not set for Scene #%d video. Falling back to image pipeline.", scene_number)
 
         jpg_path = visuals_dir / f"scene_{scene_number}.jpg"
 
-        # 2. Pollinations AI (Flux -> Turbo)
+        # 2. Pixabay Stock Photo (Primary for images)
+        if pixabay_api_key:
+            pixabay_img = self.download_pixabay_image_sync(
+                scene_number,
+                stock_query,
+                jpg_path,
+                pixabay_api_key,
+            )
+            if pixabay_img and Path(pixabay_img).exists():
+                return pixabay_img
+            self.logger.info("Pixabay photo not found for Scene #%d. Activating Pollinations AI fallback.", scene_number)
+
+        # 3. Pollinations AI (Secondary fallback: Flux -> Turbo)
         pollinations_res = self.download_pollinations_image_sync(scene_number, visual_prompt, jpg_path)
         if pollinations_res and Path(pollinations_res).exists():
             return pollinations_res
 
-        # 3. Real Stock Photo Fallback
-        self.logger.warning(
-            "Pollinations failed for Scene #%d. Activating real stock photo fallback...",
-            scene_number,
-        )
-        stock_res = self.download_stock_photo_fallback(scene_number, search_keywords, jpg_path, pexels_api_key)
+        # 4. Stock photo fallback (LoremFlickr / Picsum)
+        self.logger.warning("Pollinations failed for Scene #%d. Activating stock photo fallback...", scene_number)
+        stock_res = self.download_stock_photo_fallback(scene_number, stock_query, jpg_path)
         if stock_res and Path(stock_res).exists():
             return stock_res
 
-        # 4. Textless cinematic gradient canvas (zero error text)
+        # 5. Textless cinematic gradient canvas (zero error text)
         return self.generate_fallback_image(scene_number, jpg_path)
 
     def generate_single_scene(
@@ -640,7 +705,7 @@ class VisualGeneratorAgent(BaseAgent):
         short_id: int,
         scene_number: int,
         scene_data: Dict[str, Any],
-        pexels_api_key: Optional[str] = None,
+        pixabay_api_key: Optional[str] = None,
     ) -> str:
         """Regenerate a single scene visual surgically."""
         visuals_dir = Path(settings.MEDIA_DIR) / "visuals" / str(short_id)
@@ -649,7 +714,7 @@ class VisualGeneratorAgent(BaseAgent):
             scene_number=scene_number,
             scene_data=scene_data,
             visuals_dir=visuals_dir,
-            pexels_api_key=pexels_api_key,
+            pixabay_api_key=pixabay_api_key,
         )
 
     async def run(
@@ -670,17 +735,17 @@ class VisualGeneratorAgent(BaseAgent):
         if not scenes:
             raise ValueError("VisualGeneratorAgent requires 'scenes' inside 'script_payload'")
 
-        # Retrieve dynamic Pexels API Key
+        # Retrieve dynamic Pixabay API Key
         config = await get_active_config(db_session)
-        pexels_api_key = config.pexels_api_key
+        pixabay_api_key = config.pixabay_api_key
 
         visuals_dir = Path(settings.MEDIA_DIR) / "visuals" / str(short_id)
         visuals_dir.mkdir(parents=True, exist_ok=True)
 
         self.logger.info(
-            "Starting controlled hybrid visual generation for Short #%s (5 scenes, max_workers=2, has_pexels=%s)...",
+            "Starting controlled visual generation for Short #%s (5 scenes, max_workers=2, has_pixabay=%s)...",
             short_id,
-            bool(pexels_api_key),
+            bool(pixabay_api_key),
         )
 
         loop = asyncio.get_running_loop()
@@ -695,7 +760,7 @@ class VisualGeneratorAgent(BaseAgent):
                         s_num,
                         s,
                         visuals_dir,
-                        pexels_api_key,
+                        pixabay_api_key,
                     )
                     futures.append((s_num, fut))
                     # Stagger requests by 1.0s to avoid sudden burst to external APIs

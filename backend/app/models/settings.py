@@ -37,8 +37,8 @@ class SystemSetting(Base):
     # YouTube Data API v3 OAuth Settings
     youtube_refresh_token: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
-    # Pexels Video B-Roll API Settings
-    pexels_api_key: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Pixabay Video & Image API Settings
+    pixabay_api_key: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # Auto-Pilot (Celery Beat) Settings
     auto_schedule_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

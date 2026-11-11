@@ -13,6 +13,34 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 
+def run_ffmpeg_process(
+    cmd: List[str],
+    timeout: int = 75,
+    error_context: str = "FFmpeg",
+) -> None:
+    """Executes an FFmpeg command with strict deadlock prevention:
+    - stdout is discarded via subprocess.DEVNULL so pipes never saturate.
+    - stderr is piped and captured only on error.
+    - timeout=75 enforces hard termination before hanging.
+    - Resources and file descriptors are properly released on exceptions.
+    """
+    try:
+        subprocess.run(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+            check=True,
+        )
+    except subprocess.TimeoutExpired as exc:
+        logger.error("[%s] TIMEOUT after %ds: %s", error_context, timeout, " ".join(cmd[:8]))
+        raise RuntimeError(f"{error_context} timed out after {timeout} seconds") from exc
+    except subprocess.CalledProcessError as exc:
+        err_msg = exc.stderr.decode("utf-8", errors="replace") if exc.stderr else str(exc)
+        logger.error("[%s] FAILED (code %d): %s", error_context, exc.returncode, err_msg[-500:])
+        raise RuntimeError(f"{error_context} failed with exit code {exc.returncode}: {err_msg[-300:]}") from exc
+
+
 def ensure_background_music() -> Path:
     """Verifies that /media/music/bg_ambient.mp3 exists; if not, generates
     a subtle, high-quality ambient synthetic drone using FFmpeg.
@@ -26,6 +54,7 @@ def ensure_background_music() -> Path:
         cmd = [
             "ffmpeg",
             "-y",
+            "-threads", "2",
             "-f", "lavfi",
             "-i", "aevalsrc=0.03*sin(2*PI*110*t)+0.02*sin(2*PI*164.81*t)+0.015*sin(2*PI*220*t):s=44100:d=120",
             "-af", "lowpass=f=450,volume=0.8",
@@ -33,7 +62,7 @@ def ensure_background_music() -> Path:
             "-b:a", "128k",
             str(bg_music_path),
         ]
-        subprocess.run(cmd, capture_output=True, text=True, check=True)
+        run_ffmpeg_process(cmd, timeout=30, error_context="Generate Background Music")
         logger.info("Background music generated successfully.")
 
     return bg_music_path
@@ -52,25 +81,25 @@ def ensure_transition_whoosh_sfx() -> Path:
         cmd = [
             "ffmpeg",
             "-y",
+            "-threads", "2",
             "-f", "lavfi",
             "-i", "anoisesrc=d=0.35:c=pink:r=44100,lowpass=f=1200,afade=t=in:ss=0:d=0.15,afade=t=out:st=0.18:d=0.17,volume=0.5",
             "-c:a", "pcm_s16le",
             str(whoosh_path),
         ]
-        subprocess.run(cmd, capture_output=True, text=True, check=True)
+        run_ffmpeg_process(cmd, timeout=30, error_context="Generate Transition SFX")
         logger.info("Transition whoosh SFX generated successfully.")
 
     return whoosh_path
 
 
 class FFmpegRendererAgent(BaseAgent):
-    """Pro FFmpeg Renderer (Audio-First Architecture):
-    - Video clips are synced strictly to audio duration + 0.1s buffer with math.ceil frames.
-    - Real .mp4 B-Roll looped and cropped to 1080x1920 with color grading (contrast=1.08, saturation=1.15, brightness=-0.03).
-    - Image .jpg clips alternate between Dynamic Zoom-In (odd scenes) and Zoom-Out from 1.16x to 1.0x (even scenes), with vignette=PI/5.
-    - Transitions whoosh SFX (whoosh_sfx.wav) injected via adelay at 22% volume.
-    - Voiceover normalized to -16 LUFS via loudnorm, background music looped at 10%.
-    - Video stream extended via tpad=stop_mode=clone:stop_duration=1.5 so -shortest NEVER truncates narration.
+    """Pro FFmpeg Renderer (Optimized Low-CPU & Deadlock-Free Architecture):
+    - Strict CPU & Resource Control: -threads 2 -c:v libx264 -preset ultrafast -tune fastdecode -crf 24 on all renders.
+    - Infinite Loop & Audio Desync Prevention in B-Roll: -t {duration:.2f} right after input and -an flag to strip stock audio.
+    - Deadlock Prevention: stdout=DEVNULL, stderr=PIPE, timeout=75 on all subprocess executions.
+    - Fast Normalization: Every clip strictly conformed to 1080x1920 @ 30 FPS before final concatenation.
+    - Professional audio chain: loudnorm -16 LUFS voiceover, -10% looped ambient BGM, 22% transition whoosh SFX.
     """
 
     def __init__(self) -> None:
@@ -83,7 +112,7 @@ class FFmpegRendererAgent(BaseAgent):
 
     @staticmethod
     def get_duration(file_path: Path) -> float:
-        """Query precise floating point duration of media file using ffprobe."""
+        """Query precise floating point duration of media file using ffprobe with timeout."""
         cmd = [
             "ffprobe",
             "-v", "error",
@@ -91,8 +120,19 @@ class FFmpegRendererAgent(BaseAgent):
             "-of", "default=noprint_wrappers=1:nokey=1",
             str(file_path),
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        return float(result.stdout.strip())
+        try:
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=15,
+                check=True,
+            )
+            return float(result.stdout.strip())
+        except Exception as exc:
+            logger.warning("ffprobe failed for %s: %s; falling back to 5.0s", file_path, exc)
+            return 5.0
 
     def render_scene_clip(
         self,
@@ -101,38 +141,44 @@ class FFmpegRendererAgent(BaseAgent):
         output_clip_path: Path,
         scene_idx: int,
     ) -> str:
-        """Render an individual 9:16 scene clip directly at 1080x1920.
-        Uses math.ceil((duration + 0.1) * 30) to guarantee no clip is shorter than its audio.
+        """Render an individual 9:16 scene clip standardized strictly to 1080x1920 @ 30 FPS.
+        Applies -threads 2 -c:v libx264 -preset ultrafast -tune fastdecode -crf 24.
+        For B-Roll video, strips stock audio (-an) and enforces exact time trimming (-t).
         """
         is_video = visual_path.suffix.lower() == ".mp4"
         clip_duration = duration + 0.1
         total_frames = math.ceil(clip_duration * self.fps)
         color_grading = "eq=contrast=1.08:saturation=1.15:brightness=-0.03"
 
+        # Universal 1080x1920 @ 30 FPS normalization filter
+        norm_filter = (
+            f"scale={self.target_width}:{self.target_height}:force_original_aspect_ratio=increase,"
+            f"crop={self.target_width}:{self.target_height},"
+            f"setsar=1,"
+            f"fps={self.fps}"
+        )
+
         if is_video:
-            # Real B-Roll Video: Loop, scale/crop to center 1080x1920, conform to 30fps + color grading
-            filter_chain = (
-                f"scale={self.target_width}:{self.target_height}:force_original_aspect_ratio=increase,"
-                f"crop={self.target_width}:{self.target_height},"
-                f"setsar=1,"
-                f"fps={self.fps},"
-                f"{color_grading}"
-            )
+            # Real B-Roll Video: Loop, cut by time immediately, strip audio (-an), and normalize
+            filter_chain = f"{norm_filter},{color_grading}"
             cmd = [
                 "ffmpeg",
                 "-y",
+                "-threads", "2",
                 "-stream_loop", "-1",
                 "-i", str(visual_path),
+                "-t", f"{clip_duration:.2f}",
+                "-an",
                 "-vf", filter_chain,
                 "-c:v", "libx264",
                 "-preset", "ultrafast",
-                "-crf", "23",
-                "-threads", "0",
+                "-tune", "fastdecode",
+                "-crf", "24",
+                "-threads", "2",
                 "-pix_fmt", "yuv420p",
-                "-t", f"{clip_duration:.3f}",
                 str(output_clip_path),
             ]
-            self.logger.info("Rendering B-Roll VIDEO scene #%d (duration: %.3fs)...", scene_idx, clip_duration)
+            self.logger.info("Rendering B-Roll VIDEO scene #%d (duration: %.2fs, -threads 2, -an)...", scene_idx, clip_duration)
         else:
             # Image: Alternates camera movement based on scene number
             if scene_idx % 2 == 1:
@@ -149,26 +195,28 @@ class FFmpegRendererAgent(BaseAgent):
             filter_chain = (
                 f"zoompan=z='{zoom_expr}':d={total_frames}:x='{x_expr}':y='{y_expr}':"
                 f"s={self.target_width}x{self.target_height}:fps={self.fps},"
+                f"{norm_filter},"
                 f"vignette=PI/5,"
-                f"setsar=1,"
                 f"{color_grading}"
             )
             cmd = [
                 "ffmpeg",
                 "-y",
+                "-threads", "2",
                 "-i", str(visual_path),
+                "-t", f"{clip_duration:.2f}",
                 "-vf", filter_chain,
                 "-c:v", "libx264",
                 "-preset", "ultrafast",
-                "-crf", "23",
-                "-threads", "0",
+                "-tune", "fastdecode",
+                "-crf", "24",
+                "-threads", "2",
                 "-pix_fmt", "yuv420p",
-                "-t", f"{clip_duration:.3f}",
                 str(output_clip_path),
             ]
-            self.logger.info("Rendering Dynamic IMAGE scene #%d (duration: %.3fs)...", scene_idx, clip_duration)
+            self.logger.info("Rendering Dynamic IMAGE scene #%d (duration: %.2fs, -threads 2)...", scene_idx, clip_duration)
 
-        subprocess.run(cmd, capture_output=True, text=True, check=True)
+        run_ffmpeg_process(cmd, timeout=75, error_context=f"Render Scene #{scene_idx} Clip")
         return str(output_clip_path)
 
     def composite_final_short(
@@ -182,6 +230,7 @@ class FFmpegRendererAgent(BaseAgent):
         """Concatenate all scene clips, apply tpad clone to prevent audio clipping,
         mix voiceover with studio-grade loudnorm (-16 LUFS), loop background music at 10%,
         inject whoosh transition SFX at 22%, and burn in kinetic .ass subtitles.
+        Restricted to -threads 2 -c:v libx264 -preset ultrafast -tune fastdecode -crf 24.
         """
         concat_txt = output_video_path.parent / f"concat_{output_video_path.stem}.txt"
         with open(concat_txt, "w", encoding="utf-8") as f:
@@ -205,6 +254,7 @@ class FFmpegRendererAgent(BaseAgent):
         cmd = [
             "ffmpeg",
             "-y",
+            "-threads", "2",
             "-f", "concat",
             "-safe", "0",
             "-i", str(concat_txt),
@@ -246,8 +296,9 @@ class FFmpegRendererAgent(BaseAgent):
             "-map", "[aout]",
             "-c:v", "libx264",
             "-preset", "ultrafast",
-            "-crf", "23",
-            "-threads", "0",
+            "-tune", "fastdecode",
+            "-crf", "24",
+            "-threads", "2",
             "-pix_fmt", "yuv420p",
             "-c:a", "aac",
             "-b:a", "192k",
@@ -255,11 +306,14 @@ class FFmpegRendererAgent(BaseAgent):
             str(output_video_path),
         ])
 
-        self.logger.info("Compositing final 9:16 Short (tpad 1.5s + loudnorm + BGM + SFX + subtitles): '%s'...", output_video_path)
-        subprocess.run(cmd, capture_output=True, text=True, check=True)
+        self.logger.info("Compositing final 9:16 Short (threads 2, ultrafast, crf 24): '%s'...", output_video_path)
+        run_ffmpeg_process(cmd, timeout=75, error_context="Final Short Compositing")
 
         if concat_txt.exists():
-            concat_txt.unlink()
+            try:
+                concat_txt.unlink()
+            except Exception:
+                pass
 
         # Audio-first verification with ffprobe
         try:
@@ -275,7 +329,7 @@ class FFmpegRendererAgent(BaseAgent):
             self.logger.warning("Could not measure final duration comparison: %s", e)
 
     async def run(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Render all scene clips in parallel via ThreadPoolExecutor and assemble final MP4."""
+        """Render all scene clips in parallel (max_workers=2) and assemble final MP4."""
         t0 = time.perf_counter()
         short_id = input_data.get("short_id")
         scene_visual_paths = input_data.get("scene_visual_paths") or []
@@ -297,13 +351,13 @@ class FFmpegRendererAgent(BaseAgent):
 
         output_video = renders_dir / f"short_{short_id}.mp4"
 
-        self.logger.info("Stage: Parallel RENDERING 1080x1920 Short #%s (%d clips, Pro Grading + SFX)...", short_id, len(scene_visual_paths))
+        self.logger.info("Stage: Parallel RENDERING 1080x1920 Short #%s (%d clips, max_workers=2, CPU-controlled)...", short_id, len(scene_visual_paths))
 
         loop = asyncio.get_running_loop()
 
-        # Render all scene clips concurrently
+        # Render scene clips concurrently with max_workers=2 to cap CPU usage
         def _render_clips_parallel():
-            with ThreadPoolExecutor(max_workers=5) as executor:
+            with ThreadPoolExecutor(max_workers=2) as executor:
                 futures = []
                 for idx, (visual_path_str, duration) in enumerate(zip(scene_visual_paths, scene_durations), start=1):
                     clip_file = temp_clips_dir / f"clip_{idx}.mp4"

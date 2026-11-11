@@ -124,6 +124,7 @@ services:
     environment:
       - NEXT_PUBLIC_API_URL=http://localhost:8000/api/v1
       - PORT=3000
+      - WATCHPACK_POLLING=true
     depends_on:
       - dasmo-api
     networks:

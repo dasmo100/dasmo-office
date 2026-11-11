@@ -34,13 +34,13 @@ class SettingsResponse(BaseModel):
         False,
         description="Indica si YouTube OAuth 2.0 está conectado",
     )
-    pexels_api_key_masked: Optional[str] = Field(
+    pixabay_api_key_masked: Optional[str] = Field(
         None,
-        description="Enmascaramiento seguro de la API Key de Pexels",
+        description="Enmascaramiento seguro de la API Key de Pixabay (••••••••)",
     )
-    has_pexels_key: bool = Field(
+    has_pixabay_key: bool = Field(
         False,
-        description="Indica si existe una clave de Pexels para videos B-Roll configurada",
+        description="Indica si existe una clave de Pixabay configurada activa",
     )
     auto_schedule_enabled: bool = Field(
         False,
@@ -78,9 +78,9 @@ class SettingsUpdate(BaseModel):
         None,
         description="Refresh Token de YouTube OAuth 2.0",
     )
-    pexels_api_key: Optional[str] = Field(
+    pixabay_api_key: Optional[str] = Field(
         None,
-        description="API Key de Pexels para descargar clips de video B-Roll vertical",
+        description="API Key de Pixabay para videos B-Roll y fotografías stock",
     )
     auto_schedule_enabled: Optional[bool] = Field(
         None,
@@ -94,3 +94,8 @@ class SettingsUpdate(BaseModel):
         None,
         description="Meta de Shorts diarios",
     )
+
+
+class SettingRevealResponse(BaseModel):
+    field: str = Field(..., description="Nombre del campo de credencial revelado")
+    value: Optional[str] = Field(None, description="Valor real de la clave en texto plano")

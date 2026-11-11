@@ -326,7 +326,7 @@ async def update_and_regenerate_scene(
             short_id=short.id,
             scene_number=scene_number,
             scene_data=target_scene,
-            pexels_api_key=config.pexels_api_key,
+            pixabay_api_key=config.pixabay_api_key,
         )
 
     # 4. Rebuild master audio
